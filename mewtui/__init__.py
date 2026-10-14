@@ -5,10 +5,11 @@ import os
 import selectors
 import termios
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Self
 
-__all__ = ["Char", "Context", "Event", "screen"]
+__all__ = ["Char", "Context", "Event", "Key", "KeyName", "screen"]
 
 
 # Colors
@@ -32,26 +33,217 @@ class Char:
     alt: bool = False
 
 
-# Key and Resize join this union in later steps.
-Event = Char
+class KeyName(Enum):
+    """The named keys a Key event can carry."""
+
+    UP = "Up"
+    DOWN = "Down"
+    LEFT = "Left"
+    RIGHT = "Right"
+    HOME = "Home"
+    END = "End"
+    PAGE_UP = "PageUp"
+    PAGE_DOWN = "PageDown"
+    INSERT = "Insert"
+    DELETE = "Delete"
+    ENTER = "Enter"
+    TAB = "Tab"
+    BACKSPACE = "Backspace"
+    ESCAPE = "Escape"
+    F1 = "F1"
+    F2 = "F2"
+    F3 = "F3"
+    F4 = "F4"
+    F5 = "F5"
+    F6 = "F6"
+    F7 = "F7"
+    F8 = "F8"
+    F9 = "F9"
+    F10 = "F10"
+    F11 = "F11"
+    F12 = "F12"
 
 
-def _parse_input(text: str) -> list[Event]:
+@dataclass(frozen=True, slots=True)
+class Key:
+    """A named key such as an arrow or F1, possibly with modifiers."""
+
+    name: KeyName
+    ctrl: bool = False
+    alt: bool = False
+    shift: bool = False
+
+
+# Resize joins this union in a later step.
+Event = Char | Key
+
+# How long to wait after a trailing ESC or partial sequence before deciding.
+_ESCAPE_TIMEOUT = 0.03
+
+# Final characters of CSI and SS3 sequences that name a key directly.
+_LETTER_KEYS = {
+    "A": KeyName.UP,
+    "B": KeyName.DOWN,
+    "C": KeyName.RIGHT,
+    "D": KeyName.LEFT,
+    "H": KeyName.HOME,
+    "F": KeyName.END,
+}
+
+# Keys that only arrive as SS3 (ESC O + one character).
+_SS3_KEYS = _LETTER_KEYS | {
+    "P": KeyName.F1,
+    "Q": KeyName.F2,
+    "R": KeyName.F3,
+    "S": KeyName.F4,
+}
+
+# The number n in CSI n~ (or CSI n;m~).
+_TILDE_KEYS = {
+    1: KeyName.HOME,
+    2: KeyName.INSERT,
+    3: KeyName.DELETE,
+    4: KeyName.END,
+    5: KeyName.PAGE_UP,
+    6: KeyName.PAGE_DOWN,
+    7: KeyName.HOME,
+    8: KeyName.END,
+    11: KeyName.F1,
+    12: KeyName.F2,
+    13: KeyName.F3,
+    14: KeyName.F4,
+    15: KeyName.F5,
+    17: KeyName.F6,
+    18: KeyName.F7,
+    19: KeyName.F8,
+    20: KeyName.F9,
+    21: KeyName.F10,
+    23: KeyName.F11,
+    24: KeyName.F12,
+}
+
+
+def _parse_input(text: str) -> tuple[list[Event], str]:
     """Turn decoded terminal input into events.
 
-    For now only printable characters and Ctrl+letter become events;
-    everything else (Enter, Tab, Backspace, ESC and escape sequences) is dropped.
+    Returns the events and any unfinished escape sequence at the end of text.
+    The caller keeps that leftover, prepends it to the next input, or passes it
+    to _parse_leftover() if no more input arrives in time.
     """
     events: list[Event] = []
-    for ch in text:
-        code = ord(ch)
-        if code == 0x00:
-            events.append(Char(" ", ctrl=True))
-        elif 0x01 <= code <= 0x1A and ch not in "\t\r":
-            events.append(Char(chr(0x60 + code), ctrl=True))
-        elif ch.isprintable():
-            events.append(Char(ch))
-    return events
+    i = 0
+    while i < len(text):
+        if text[i] == "\x1b":
+            result = _parse_escape(text, i)
+            if result is None:
+                return events, text[i:]
+            event, i = result
+        else:
+            event = _char_event(text[i])
+            i += 1
+        if event is not None:
+            events.append(event)
+    return events, ""
+
+
+def _parse_leftover(leftover: str) -> list[Event]:
+    """Decide what an unfinished sequence meant once no more input came."""
+    if leftover == "\x1b":
+        return [Key(KeyName.ESCAPE)]
+    return []
+
+
+def _char_event(ch: str) -> Event | None:
+    """The event for one character outside an escape sequence, if any."""
+    code = ord(ch)
+    if ch == "\r":
+        return Key(KeyName.ENTER)
+    if ch == "\t":
+        return Key(KeyName.TAB)
+    if ch == "\x7f":
+        return Key(KeyName.BACKSPACE)
+    if ch == "\x1b":
+        return Key(KeyName.ESCAPE)
+    if code == 0x00:
+        return Char(" ", ctrl=True)
+    if 0x01 <= code <= 0x1A:
+        return Char(chr(0x60 + code), ctrl=True)
+    if ch.isprintable():
+        return Char(ch)
+    return None
+
+
+def _parse_escape(text: str, i: int) -> tuple[Event | None, int] | None:
+    """Parse the sequence starting with the ESC at text[i].
+
+    Returns the event (None if dropped) and the index after the sequence,
+    or None if text ends before the sequence is complete.
+    """
+    if i + 1 == len(text):
+        return None
+    second = text[i + 1]
+    if second == "[":
+        return _parse_csi(text, i + 2)
+    if second == "O":
+        if i + 2 == len(text):
+            return None
+        name = _SS3_KEYS.get(text[i + 2])
+        return (Key(name) if name else None), i + 3
+    event = _char_event(second)
+    return (replace(event, alt=True) if event else None), i + 2
+
+
+def _parse_csi(text: str, start: int) -> tuple[Event | None, int] | None:
+    """Parse a CSI sequence whose parameters begin at text[start].
+
+    A CSI is parameter bytes 0x30-0x3F, intermediate bytes 0x20-0x2F, then one
+    final byte 0x40-0x7E. Returns None if text ends before the final byte.
+    """
+    i = start
+    while i < len(text) and "\x30" <= text[i] <= "\x3f":
+        i += 1
+    params_end = i
+    while i < len(text) and "\x20" <= text[i] <= "\x2f":
+        i += 1
+    if i == len(text):
+        return None
+    final = text[i]
+    if not "\x40" <= final <= "\x7e":
+        # Malformed: drop what was read and resume at the offending character.
+        return None, i
+    if params_end != i:
+        # Intermediate bytes: no key uses them.
+        return None, i + 1
+    return _csi_event(text[start:params_end], final), i + 1
+
+
+def _csi_event(params: str, final: str) -> Key | None:
+    """The key for a CSI sequence with the given parameters and final byte."""
+    fields = params.split(";") if params else []
+    if not all(field.isdigit() for field in fields) or len(fields) > 2:
+        return None
+    numbers = [int(field) for field in fields]
+    modifier = numbers[1] if len(numbers) == 2 else 1
+    if final == "~":
+        if not numbers or numbers[0] not in _TILDE_KEYS:
+            return None
+        return _with_modifier(_TILDE_KEYS[numbers[0]], modifier)
+    if final == "Z" and not numbers:
+        return Key(KeyName.TAB, shift=True)
+    if final in _LETTER_KEYS and numbers in ([], [1], [1, modifier]):
+        return _with_modifier(_LETTER_KEYS[final], modifier)
+    return None
+
+
+def _with_modifier(name: KeyName, modifier: int) -> Key | None:
+    """Build a Key from a modifier parameter: modifier - 1 is a bitmask.
+
+    The bits are 1 = shift, 2 = alt, 4 = ctrl; anything below 1 is invalid.
+    """
+    if modifier < 1:
+        return None
+    bits = modifier - 1
+    return Key(name, ctrl=bool(bits & 4), alt=bool(bits & 2), shift=bool(bits & 1))
 
 
 # Escape sequences
@@ -190,6 +382,7 @@ class Context:
         self._y = 0
         self._buffer: list[str] = []
         self._events: list[Event] = []
+        self._leftover = ""
 
     def __enter__(self) -> Self:
         self._terminal = _Terminal()
@@ -264,13 +457,23 @@ class Context:
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         while not self._events:
-            remaining = (
-                None if deadline is None else max(deadline - time.monotonic(), 0)
-            )
-            text = self._term().read(remaining)
-            if text is None:
-                return None
-            self._events.extend(_parse_input(text))
+            if self._leftover:
+                # A trailing ESC may be the start of a sequence: give the rest
+                # of it a moment to arrive before deciding.
+                text = self._term().read(_ESCAPE_TIMEOUT)
+                if text is None:
+                    self._events.extend(_parse_leftover(self._leftover))
+                    self._leftover = ""
+                    continue
+            else:
+                remaining = (
+                    None if deadline is None else max(deadline - time.monotonic(), 0)
+                )
+                text = self._term().read(remaining)
+                if text is None:
+                    return None
+            events, self._leftover = _parse_input(self._leftover + text)
+            self._events.extend(events)
         return self._events.pop(0)
 
 
