@@ -121,6 +121,7 @@ with mewtui.screen() as ctx:             # raw mode + alternate screen, restored
               underline=None, reverse=None, strikethrough=None)
     ctx.reset_style()
     ctx.put(text, wrap=False)
+    ctx.set(char, x, y)                       # one cell; the cursor does not move
     ctx.clear(box=None)
     ctx.flush()
     event = ctx.wait_event(timeout=None)
@@ -132,7 +133,7 @@ with mewtui.screen() as ctx:             # raw mode + alternate screen, restored
 - **Coordinates**: 0-based `(x, y)` = (column, row). Converted to the terminal's 1-based form internally.
 - **Output is buffered**: all calls append to an internal buffer. Bytes reach the terminal only when `flush()` is called. No automatic flushing.
 - **Style inherits**: `style(...)` only changes the arguments that are given; `None` means keep the current value. `reset_style()` returns to the default style.
-- **Default style**: a global `mewtui.default_style` (a `Style` struct) the user can set before `screen()`, with nice defaults.
+- **Default style**: a global `mewtui.default_style` (a `Style` struct) the user can set before `screen()`, with nice defaults. `screen()` reads it on enter: drawing starts in it and `reset_style()` returns to it.
 - **Colors**: a color argument is one of
   - the string `"default"` (terminal default),
   - a CSS color string: named colors, `#rgb`, `#rrggbb`, `rgb(r, g, b)`; these always become `Rgb`,
@@ -143,7 +144,7 @@ with mewtui.screen() as ctx:             # raw mode + alternate screen, restored
 - **Cursor after `put`**: right after the last character written, in both modes, but never past column `width` (the column just past the last visible one), so a further `put` on that row is cropped to nothing. With `wrap=True`, a line that ends exactly at the right edge leaves the cursor at the edge rather than on the next row, and when lines are dropped past the bottom the cursor stays after the last character actually written. `cursor_set` and `cursor_delta` can still place the cursor off-screen on purpose.
 - **Control characters in `put`**: each one (C0, DEL, C1, including tabs, `\x1b` and `\r`) is replaced with `U+FFFD`, so text can't inject escape sequences. `\n` is the exception when `wrap=True`.
 - **Wide characters** (CJK, emoji): every character counts as one cell for now.
-- **`clear(box=None)`**: `None` means the whole window; otherwise clears the given `Box`.
+- **`clear(box=None)`**: `None` means the whole window; otherwise clears the given `Box`. It fills with spaces in the current background color and leaves the cursor where it was.
 - **`Box(x, y, w, h)`**: a reusable rectangle class for use by other functions too.
 - **`wait_event(timeout=None)`**: `None` blocks until an event arrives; a number waits that many seconds and returns `None` on timeout. A non-blocking queue may come later.
 - **Events** (tagged union):
@@ -199,6 +200,7 @@ On exit, in this order, again written immediately: `\x1b[0m` (reset style), `\x1
 | `cursor_visibility(v)` | DECTCEM `\x1b[?25h` / `\x1b[?25l` | |
 | `style(...)`, `reset_style()` | nothing | Only update the current `Style`. SGR is emitted lazily (see Style to SGR). |
 | `put(text)` | pending SGR, then for each visible line: CUP + the cropped text | Always emit CUP before each line from the tracked position; never rely on the terminal advancing the cursor across lines. Update the tracked position after writing. |
+| `set(char, x, y)` | pending SGR, CUP to `(x, y)`, the character, then CUP back to the tracked cursor position | The tracked cursor does not move. Off-screen cells are dropped. `char` must be exactly one character (`ValueError` otherwise); a control character becomes `U+FFFD`. |
 | `clear()` | pending SGR, then ED `\x1b[2J` | Erases the whole window with the current background color. Cursor unchanged. |
 | `clear(box)` | pending SGR, then for each row of the box clipped to the window: CUP + `" " * clipped_width` | Then CUP back to the tracked cursor position. |
 | `flush()` | the buffer wrapped in `\x1b[?2026h` ... `\x1b[?2026l` | Synchronized output: the terminal paints the batch at once; terminals without support ignore it. One `os.write` loop, then empty the buffer. |
@@ -257,6 +259,4 @@ Don't enable mouse reporting, bracketed paste, focus events, the kitty keyboard 
 
 ## Open questions (not yet confirmed by the user)
 
-1. Is the reading of `default_style` above right, and are the six attributes the right set?
-2. `clear` colors: proposed to fill with spaces in the current background color and leave the cursor where it was.
-3. Python version: proposed 3.11+.
+1. Python version: proposed 3.11+.

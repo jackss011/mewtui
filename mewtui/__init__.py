@@ -2,6 +2,7 @@
 
 import codecs
 import os
+import re
 import selectors
 import signal
 import termios
@@ -12,13 +13,279 @@ from enum import Enum
 from types import FrameType
 from typing import Self
 
-__all__ = ["Char", "Context", "Event", "Key", "KeyName", "Resize", "screen"]
+__all__ = [
+    "Ansi",
+    "Char",
+    "Color",
+    "Context",
+    "Event",
+    "Indexed",
+    "Key",
+    "KeyName",
+    "Resize",
+    "Rgb",
+    "Style",
+    "default_style",
+    "screen",
+]
 
 
 # Colors
 
 
+@dataclass(frozen=True, slots=True)
+class Ansi:
+    """One of the 16 theme colors (0-7 normal, 8-15 bright); follows the terminal theme."""
+
+    index: int
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.index <= 15:
+            raise ValueError(f"Ansi index must be 0-15, got {self.index}")
+
+
+@dataclass(frozen=True, slots=True)
+class Indexed:
+    """A color from the terminal's 256-color palette."""
+
+    index: int
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.index <= 255:
+            raise ValueError(f"Indexed index must be 0-255, got {self.index}")
+
+
+@dataclass(frozen=True, slots=True)
+class Rgb:
+    """A 24-bit color."""
+
+    r: int
+    g: int
+    b: int
+
+    def __post_init__(self) -> None:
+        if not all(0 <= c <= 255 for c in (self.r, self.g, self.b)):
+            raise ValueError(
+                f"Rgb components must be 0-255, got ({self.r}, {self.g}, {self.b})"
+            )
+
+
+Color = Ansi | Indexed | Rgb
+
+# The 148 named colors of CSS Color Level 4 ("transparent" is not a color here).
+_CSS_NAMES = {
+    "aliceblue": "#f0f8ff",
+    "antiquewhite": "#faebd7",
+    "aqua": "#00ffff",
+    "aquamarine": "#7fffd4",
+    "azure": "#f0ffff",
+    "beige": "#f5f5dc",
+    "bisque": "#ffe4c4",
+    "black": "#000000",
+    "blanchedalmond": "#ffebcd",
+    "blue": "#0000ff",
+    "blueviolet": "#8a2be2",
+    "brown": "#a52a2a",
+    "burlywood": "#deb887",
+    "cadetblue": "#5f9ea0",
+    "chartreuse": "#7fff00",
+    "chocolate": "#d2691e",
+    "coral": "#ff7f50",
+    "cornflowerblue": "#6495ed",
+    "cornsilk": "#fff8dc",
+    "crimson": "#dc143c",
+    "cyan": "#00ffff",
+    "darkblue": "#00008b",
+    "darkcyan": "#008b8b",
+    "darkgoldenrod": "#b8860b",
+    "darkgray": "#a9a9a9",
+    "darkgreen": "#006400",
+    "darkgrey": "#a9a9a9",
+    "darkkhaki": "#bdb76b",
+    "darkmagenta": "#8b008b",
+    "darkolivegreen": "#556b2f",
+    "darkorange": "#ff8c00",
+    "darkorchid": "#9932cc",
+    "darkred": "#8b0000",
+    "darksalmon": "#e9967a",
+    "darkseagreen": "#8fbc8f",
+    "darkslateblue": "#483d8b",
+    "darkslategray": "#2f4f4f",
+    "darkslategrey": "#2f4f4f",
+    "darkturquoise": "#00ced1",
+    "darkviolet": "#9400d3",
+    "deeppink": "#ff1493",
+    "deepskyblue": "#00bfff",
+    "dimgray": "#696969",
+    "dimgrey": "#696969",
+    "dodgerblue": "#1e90ff",
+    "firebrick": "#b22222",
+    "floralwhite": "#fffaf0",
+    "forestgreen": "#228b22",
+    "fuchsia": "#ff00ff",
+    "gainsboro": "#dcdcdc",
+    "ghostwhite": "#f8f8ff",
+    "gold": "#ffd700",
+    "goldenrod": "#daa520",
+    "gray": "#808080",
+    "green": "#008000",
+    "greenyellow": "#adff2f",
+    "grey": "#808080",
+    "honeydew": "#f0fff0",
+    "hotpink": "#ff69b4",
+    "indianred": "#cd5c5c",
+    "indigo": "#4b0082",
+    "ivory": "#fffff0",
+    "khaki": "#f0e68c",
+    "lavender": "#e6e6fa",
+    "lavenderblush": "#fff0f5",
+    "lawngreen": "#7cfc00",
+    "lemonchiffon": "#fffacd",
+    "lightblue": "#add8e6",
+    "lightcoral": "#f08080",
+    "lightcyan": "#e0ffff",
+    "lightgoldenrodyellow": "#fafad2",
+    "lightgray": "#d3d3d3",
+    "lightgreen": "#90ee90",
+    "lightgrey": "#d3d3d3",
+    "lightpink": "#ffb6c1",
+    "lightsalmon": "#ffa07a",
+    "lightseagreen": "#20b2aa",
+    "lightskyblue": "#87cefa",
+    "lightslategray": "#778899",
+    "lightslategrey": "#778899",
+    "lightsteelblue": "#b0c4de",
+    "lightyellow": "#ffffe0",
+    "lime": "#00ff00",
+    "limegreen": "#32cd32",
+    "linen": "#faf0e6",
+    "magenta": "#ff00ff",
+    "maroon": "#800000",
+    "mediumaquamarine": "#66cdaa",
+    "mediumblue": "#0000cd",
+    "mediumorchid": "#ba55d3",
+    "mediumpurple": "#9370db",
+    "mediumseagreen": "#3cb371",
+    "mediumslateblue": "#7b68ee",
+    "mediumspringgreen": "#00fa9a",
+    "mediumturquoise": "#48d1cc",
+    "mediumvioletred": "#c71585",
+    "midnightblue": "#191970",
+    "mintcream": "#f5fffa",
+    "mistyrose": "#ffe4e1",
+    "moccasin": "#ffe4b5",
+    "navajowhite": "#ffdead",
+    "navy": "#000080",
+    "oldlace": "#fdf5e6",
+    "olive": "#808000",
+    "olivedrab": "#6b8e23",
+    "orange": "#ffa500",
+    "orangered": "#ff4500",
+    "orchid": "#da70d6",
+    "palegoldenrod": "#eee8aa",
+    "palegreen": "#98fb98",
+    "paleturquoise": "#afeeee",
+    "palevioletred": "#db7093",
+    "papayawhip": "#ffefd5",
+    "peachpuff": "#ffdab9",
+    "peru": "#cd853f",
+    "pink": "#ffc0cb",
+    "plum": "#dda0dd",
+    "powderblue": "#b0e0e6",
+    "purple": "#800080",
+    "rebeccapurple": "#663399",
+    "red": "#ff0000",
+    "rosybrown": "#bc8f8f",
+    "royalblue": "#4169e1",
+    "saddlebrown": "#8b4513",
+    "salmon": "#fa8072",
+    "sandybrown": "#f4a460",
+    "seagreen": "#2e8b57",
+    "seashell": "#fff5ee",
+    "sienna": "#a0522d",
+    "silver": "#c0c0c0",
+    "skyblue": "#87ceeb",
+    "slateblue": "#6a5acd",
+    "slategray": "#708090",
+    "slategrey": "#708090",
+    "snow": "#fffafa",
+    "springgreen": "#00ff7f",
+    "steelblue": "#4682b4",
+    "tan": "#d2b48c",
+    "teal": "#008080",
+    "thistle": "#d8bfd8",
+    "tomato": "#ff6347",
+    "turquoise": "#40e0d0",
+    "violet": "#ee82ee",
+    "wheat": "#f5deb3",
+    "white": "#ffffff",
+    "whitesmoke": "#f5f5f5",
+    "yellow": "#ffff00",
+    "yellowgreen": "#9acd32",
+}
+
+_CSS_HEX3 = re.compile(r"#([0-9a-f])([0-9a-f])([0-9a-f])")
+_CSS_HEX6 = re.compile(r"#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})")
+_CSS_RGB = re.compile(r"rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
+
+
+def _parse_color(value: str | Color) -> Color | None:
+    """Turn a color argument into a Color, or None for the terminal default.
+
+    value is "default", a CSS color string, or an Ansi, Indexed or Rgb.
+    """
+    if not isinstance(value, str):
+        return value
+    if value.strip().lower() == "default":
+        return None
+    return _parse_css_color(value)
+
+
+def _parse_css_color(text: str) -> Rgb:
+    """Parse a CSS color: a name, #rgb, #rrggbb or rgb(r, g, b)."""
+    css = text.strip().lower()
+    css = _CSS_NAMES.get(css, css)
+    if match := _CSS_HEX3.fullmatch(css):
+        # Each digit is doubled: #f80 is #ff8800.
+        r, g, b = (int(digit * 2, 16) for digit in match.groups())
+        return Rgb(r, g, b)
+    if match := _CSS_HEX6.fullmatch(css):
+        r, g, b = (int(pair, 16) for pair in match.groups())
+        return Rgb(r, g, b)
+    if match := _CSS_RGB.fullmatch(css):
+        r, g, b = (int(number) for number in match.groups())
+        if not all(0 <= c <= 255 for c in (r, g, b)):
+            raise ValueError(f"rgb() components must be 0-255 in {text!r}")
+        return Rgb(r, g, b)
+    raise ValueError(
+        f'not a color: {text!r} (expected "default", a CSS color name, '
+        "#rgb, #rrggbb or rgb(r, g, b))"
+    )
+
+
 # Style
+
+
+@dataclass(frozen=True, slots=True)
+class Style:
+    """Colors and attributes for drawn text.
+
+    fg and bg of None mean the terminal's default colors.
+    """
+
+    fg: Color | None = None
+    bg: Color | None = None
+    bold: bool = False
+    dim: bool = False
+    italic: bool = False
+    underline: bool = False
+    reverse: bool = False
+    strikethrough: bool = False
+
+
+# Set this before screen() to change the style drawing starts with and
+# reset_style() returns to.
+default_style = Style()
 
 
 # Geometry
@@ -278,6 +545,46 @@ _SYNC_BEGIN = "\x1b[?2026h"
 _SYNC_END = "\x1b[?2026l"
 
 
+# ED 2: erase the whole window, filling it with the current background color.
+_ERASE_SCREEN = "\x1b[2J"
+
+
+def _sgr(style: Style) -> str:
+    """SGR: set the full style, starting from a reset (0) so nothing carries over.
+
+    Example: bold red text on the default background is \x1b[0;1;38;2;255;0;0m.
+    """
+    params = ["0"]
+    for on, code in [
+        (style.bold, "1"),
+        (style.dim, "2"),
+        (style.italic, "3"),
+        (style.underline, "4"),
+        (style.reverse, "7"),
+        (style.strikethrough, "9"),
+    ]:
+        if on:
+            params.append(code)
+    if style.fg is not None:
+        params.append(_color_params(style.fg, background=False))
+    if style.bg is not None:
+        params.append(_color_params(style.bg, background=True))
+    return f"\x1b[{';'.join(params)}m"
+
+
+def _color_params(color: Color, background: bool) -> str:
+    """The SGR parameters that select color as foreground or background."""
+    match color:
+        case Ansi(index) if index < 8:
+            return str((40 if background else 30) + index)
+        case Ansi(index):
+            return str((100 if background else 90) + index - 8)
+        case Indexed(index):
+            return f"{48 if background else 38};5;{index}"
+        case Rgb(r, g, b):
+            return f"{48 if background else 38};2;{r};{g};{b}"
+
+
 def _cup(x: int, y: int) -> str:
     """CUP: move cursor to (row, col), 1-based.
 
@@ -444,8 +751,15 @@ class Context:
         self._buffer: list[str] = []
         self._events: list[Event] = []
         self._leftover = ""
+        self._default_style = default_style
+        self._style = default_style
+        # What the terminal has; None until the first SGR, so the first draw emits one.
+        self._emitted_style: Style | None = None
 
     def __enter__(self) -> Self:
+        # Read the global now, so setting it any time before screen() works.
+        self._default_style = default_style
+        self._style = default_style
         self._terminal = _Terminal()
         self._width, self._height = self._terminal.size()
         return self
@@ -506,9 +820,73 @@ class Context:
         start, visible = _crop_line(line, self._x, self._width)
         if not visible:
             return
+        self._emit_style()
         self._buffer.append(_cup(start, self._y))
         self._buffer.append(visible)
         self._x = start + len(visible)
+
+    def set(self, char: str, x: int, y: int) -> None:
+        """Draw one character at column x, row y, without moving the cursor.
+
+        Uses the current style. Off-screen cells are dropped, a control character
+        becomes U+FFFD, and anything but exactly one character raises ValueError.
+        """
+        if len(char) != 1:
+            raise ValueError(f"set() needs exactly one character, got {char!r}")
+        if not (0 <= x < self._width and 0 <= y < self._height):
+            return
+        self._emit_style()
+        self._buffer.append(_cup(x, y))
+        self._buffer.append(_sanitize(char))
+        # Put the terminal's cursor back where the program's cursor is.
+        self._buffer.append(_cup(self._x, self._y))
+
+    def style(
+        self,
+        fg: str | Color | None = None,
+        bg: str | Color | None = None,
+        bold: bool | None = None,
+        dim: bool | None = None,
+        italic: bool | None = None,
+        underline: bool | None = None,
+        reverse: bool | None = None,
+        strikethrough: bool | None = None,
+    ) -> None:
+        """Change the style for what is drawn next.
+
+        Only the arguments given change; None keeps the current value. A color is
+        "default" (the terminal's), a CSS color string, or an Ansi, Indexed or Rgb.
+        Raises ValueError for a malformed color.
+        """
+        old = self._style
+        self._style = Style(
+            fg=old.fg if fg is None else _parse_color(fg),
+            bg=old.bg if bg is None else _parse_color(bg),
+            bold=old.bold if bold is None else bold,
+            dim=old.dim if dim is None else dim,
+            italic=old.italic if italic is None else italic,
+            underline=old.underline if underline is None else underline,
+            reverse=old.reverse if reverse is None else reverse,
+            strikethrough=old.strikethrough if strikethrough is None else strikethrough,
+        )
+
+    def reset_style(self) -> None:
+        """Go back to the default style (mewtui.default_style when screen() started)."""
+        self._style = self._default_style
+
+    def clear(self) -> None:
+        """Erase the whole window with the current background color.
+
+        The cursor stays where it was.
+        """
+        self._emit_style()
+        self._buffer.append(_ERASE_SCREEN)
+
+    def _emit_style(self) -> None:
+        """Append an SGR if the terminal's style differs from the current one."""
+        if self._emitted_style != self._style:
+            self._buffer.append(_sgr(self._style))
+            self._emitted_style = self._style
 
     def flush(self) -> None:
         """Send everything drawn since the last flush to the terminal, in one batch."""
