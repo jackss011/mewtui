@@ -22,7 +22,7 @@ def modifiers(ctrl: bool, alt: bool, shift: bool) -> str:
 
 
 with mewtui.screen() as ctx:
-    ctx.cursor_move(0, 0)
+    ctx.cursor_set(0, 0)
     ctx.put("Press keys or resize the window to see events. Ctrl-C quits.")
     ctx.flush()
 
@@ -36,6 +36,6 @@ with mewtui.screen() as ctx:
         lines = (lines + [f"{describe(event):<20} {event}"])[-(ctx.height() - 2) :]
         # Pad each line with spaces so it overwrites what was there before.
         for row, line in enumerate(lines):
-            ctx.cursor_move(0, row + 2)
+            ctx.cursor_set(0, row + 2)
             ctx.put(line.ljust(ctx.width()))
         ctx.flush()

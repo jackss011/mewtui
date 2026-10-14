@@ -7,11 +7,11 @@ with mewtui.screen() as ctx:
     width, height = ctx.size()
 
     message = "hello"
-    ctx.cursor_move((width - len(message)) // 2, height // 2)
+    ctx.cursor_set((width - len(message)) // 2, height // 2)
     ctx.put(message)
 
     hint = "press q or Ctrl-C to quit"
-    ctx.cursor_move((width - len(hint)) // 2, height // 2 + 2)
+    ctx.cursor_set((width - len(hint)) // 2, height // 2 + 2)
     ctx.put(hint)
     ctx.flush()
 

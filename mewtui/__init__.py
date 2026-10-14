@@ -473,7 +473,7 @@ class Context:
         """Return (width, height)."""
         return self._width, self._height
 
-    def cursor_move(self, x: int, y: int) -> None:
+    def cursor_set(self, x: int, y: int) -> None:
         """Move the cursor to column x, row y (0-based).
 
         Off-screen positions are allowed; drawing there is cropped.
@@ -481,6 +481,13 @@ class Context:
         self._x = x
         self._y = y
         self._buffer.append(_cup(x, y))
+
+    def cursor_delta(self, dx: int, dy: int) -> None:
+        """Move the cursor by dx columns and dy rows from where it is.
+
+        Same rules as cursor_set(): the result may be off-screen.
+        """
+        self.cursor_set(self._x + dx, self._y + dy)
 
     def cursor_visibility(self, visible: bool) -> None:
         """Show or hide the cursor."""

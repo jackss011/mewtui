@@ -114,7 +114,8 @@ mewtui.default_style = Style(...)        # optional, set before screen()
 
 with mewtui.screen() as ctx:             # raw mode + alternate screen, restored on exit
     ctx.width(); ctx.height(); ctx.size()    # size() -> (width, height)
-    ctx.cursor_move(x, y)                     # 0-based column, row
+    ctx.cursor_set(x, y)                      # 0-based column, row
+    ctx.cursor_delta(dx, dy)                  # relative to the current position
     ctx.cursor_visibility(visible)
     ctx.style(fg=None, bg=None, bold=None, dim=None, italic=None,
               underline=None, reverse=None, strikethrough=None)
@@ -139,7 +140,7 @@ with mewtui.screen() as ctx:             # raw mode + alternate screen, restored
   Internally this is a tagged union (frozen dataclasses) mapping to SGR sequences.
 - **Attributes**: bold, dim, italic, underline, reverse, strikethrough.
 - **`put(text, wrap=False)`**: by default writes only the first line of `text`, cropped to the window width. With `wrap=True` it breaks on `\n` and at the right edge, continuing at the column where the `put` started. Text past the bottom edge is dropped. No scrolling.
-- **Cursor after `put`**: right after the last character written, in both modes, but never past column `width` (the column just past the last visible one), so a further `put` on that row is cropped to nothing. With `wrap=True`, a line that ends exactly at the right edge leaves the cursor at the edge rather than on the next row, and when lines are dropped past the bottom the cursor stays after the last character actually written. `cursor_move` can still place the cursor off-screen on purpose.
+- **Cursor after `put`**: right after the last character written, in both modes, but never past column `width` (the column just past the last visible one), so a further `put` on that row is cropped to nothing. With `wrap=True`, a line that ends exactly at the right edge leaves the cursor at the edge rather than on the next row, and when lines are dropped past the bottom the cursor stays after the last character actually written. `cursor_set` and `cursor_delta` can still place the cursor off-screen on purpose.
 - **Control characters in `put`**: each one (C0, DEL, C1, including tabs, `\x1b` and `\r`) is replaced with `U+FFFD`, so text can't inject escape sequences. `\n` is the exception when `wrap=True`.
 - **Wide characters** (CJK, emoji): every character counts as one cell for now.
 - **`clear(box=None)`**: `None` means the whole window; otherwise clears the given `Box`.
@@ -193,7 +194,8 @@ On exit, in this order, again written immediately: `\x1b[0m` (reset style), `\x1
 
 | Method | Emits | Notes |
 | --- | --- | --- |
-| `cursor_move(x, y)` | CUP `\x1b[{y+1};{x+1}H` | Updates the tracked cursor position. Positions outside the window are allowed; drawing there is cropped. |
+| `cursor_set(x, y)` | CUP `\x1b[{y+1};{x+1}H` | Updates the tracked cursor position. Positions outside the window are allowed; drawing there is cropped. |
+| `cursor_delta(dx, dy)` | CUP to the tracked position plus `(dx, dy)` | Same as `cursor_set` on the new position. Never the relative sequences (CUU/CUD/CUF/CUB): the terminal stops those at the edge, while the tracked position may be off-screen. |
 | `cursor_visibility(v)` | DECTCEM `\x1b[?25h` / `\x1b[?25l` | |
 | `style(...)`, `reset_style()` | nothing | Only update the current `Style`. SGR is emitted lazily (see Style to SGR). |
 | `put(text)` | pending SGR, then for each visible line: CUP + the cropped text | Always emit CUP before each line from the tracked position; never rely on the terminal advancing the cursor across lines. Update the tracked position after writing. |
