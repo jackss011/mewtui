@@ -15,6 +15,7 @@ from typing import Self
 
 __all__ = [
     "Ansi",
+    "Box",
     "Char",
     "Color",
     "Context",
@@ -289,6 +290,20 @@ default_style = Style()
 
 
 # Geometry
+
+
+@dataclass(frozen=True, slots=True)
+class Box:
+    """A rectangle: column x, row y (0-based), w columns wide and h rows tall."""
+
+    x: int
+    y: int
+    w: int
+    h: int
+
+    def __post_init__(self) -> None:
+        if self.w < 0 or self.h < 0:
+            raise ValueError(f"Box size must not be negative, got {self.w}x{self.h}")
 
 
 # Events and the input parser
@@ -614,6 +629,48 @@ def _crop_line(text: str, x: int, width: int) -> tuple[int, str]:
     return start, visible
 
 
+def _layout(
+    text: str, x: int, y: int, width: int, height: int, wrap: bool
+) -> tuple[list[tuple[int, int, str]], tuple[int, int] | None]:
+    """Work out what put() draws: (column, row, text) pieces and the new cursor.
+
+    Without wrap only the first line is used. With wrap, text breaks on "\n"
+    and at the right edge, and every row starts at column x. Rows above the
+    window are skipped, rows below it dropped. The cursor is right after the
+    last character drawn, or None if nothing is visible.
+    """
+    lines = text.split("\n") if wrap else [text.split("\n", 1)[0]]
+    span = width - x  # columns from the start column to the right edge
+    rows: list[str] = []
+    for line in lines:
+        line = _sanitize(line)
+        if wrap and span > 0 and line:
+            rows.extend(line[i : i + span] for i in range(0, len(line), span))
+        else:
+            rows.append(line)
+
+    pieces: list[tuple[int, int, str]] = []
+    cursor: tuple[int, int] | None = None
+    for offset, row_text in enumerate(rows):
+        row = y + offset
+        if row >= height:
+            break
+        if row < 0:
+            continue
+        start, visible = _crop_line(row_text, x, width)
+        if visible:
+            pieces.append((start, row, visible))
+            cursor = (start + len(visible), row)
+    return pieces, cursor
+
+
+def _clip_box(box: Box, width: int, height: int) -> Box:
+    """The part of box inside a window of the given size (possibly empty)."""
+    x0, y0 = max(box.x, 0), max(box.y, 0)
+    x1, y1 = min(box.x + box.w, width), min(box.y + box.h, height)
+    return Box(x0, y0, max(x1 - x0, 0), max(y1 - y0, 0))
+
+
 # Terminal
 
 
@@ -807,23 +864,25 @@ class Context:
         """Show or hide the cursor."""
         self._buffer.append(_CURSOR_SHOW if visible else _CURSOR_HIDE)
 
-    def put(self, text: str) -> None:
-        """Write the first line of text at the cursor, cropped to the window.
+    def put(self, text: str, wrap: bool = False) -> None:
+        """Write text at the cursor, cropped to the window.
 
-        Control characters become U+FFFD. The cursor ends right after the last
-        character written, but never past column width(). If nothing is visible,
-        nothing is written and the cursor stays where it was.
+        By default only the first line is written. With wrap=True, text breaks on
+        "\n" and at the right edge, each line starting at the cursor's column;
+        lines past the bottom are dropped. Control characters become U+FFFD.
+        The cursor ends right after the last character written, never past
+        column width(). If nothing is visible, the cursor stays where it was.
         """
-        line = _sanitize(text.split("\n", 1)[0])
-        if not 0 <= self._y < self._height:
-            return
-        start, visible = _crop_line(line, self._x, self._width)
-        if not visible:
+        pieces, cursor = _layout(
+            text, self._x, self._y, self._width, self._height, wrap
+        )
+        if cursor is None:
             return
         self._emit_style()
-        self._buffer.append(_cup(start, self._y))
-        self._buffer.append(visible)
-        self._x = start + len(visible)
+        for x, y, visible in pieces:
+            self._buffer.append(_cup(x, y))
+            self._buffer.append(visible)
+        self._x, self._y = cursor
 
     def set(self, char: str, x: int, y: int) -> None:
         """Draw one character at column x, row y, without moving the cursor.
@@ -874,13 +933,24 @@ class Context:
         """Go back to the default style (mewtui.default_style when screen() started)."""
         self._style = self._default_style
 
-    def clear(self) -> None:
-        """Erase the whole window with the current background color.
+    def clear(self, box: Box | None = None) -> None:
+        """Erase the whole window, or only box, with the current background color.
 
-        The cursor stays where it was.
+        The part of box outside the window is ignored. The cursor stays where it was.
         """
+        if box is None:
+            self._emit_style()
+            self._buffer.append(_ERASE_SCREEN)
+            return
+        visible = _clip_box(box, self._width, self._height)
+        if visible.w == 0 or visible.h == 0:
+            return
         self._emit_style()
-        self._buffer.append(_ERASE_SCREEN)
+        for row in range(visible.y, visible.y + visible.h):
+            self._buffer.append(_cup(visible.x, row))
+            self._buffer.append(" " * visible.w)
+        # Put the terminal's cursor back where the program's cursor is.
+        self._buffer.append(_cup(self._x, self._y))
 
     def _emit_style(self) -> None:
         """Append an SGR if the terminal's style differs from the current one."""
