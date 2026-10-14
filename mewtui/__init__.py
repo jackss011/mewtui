@@ -3,13 +3,16 @@
 import codecs
 import os
 import selectors
+import signal
 import termios
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
+from types import FrameType
 from typing import Self
 
-__all__ = ["Char", "Context", "Event", "Key", "KeyName", "screen"]
+__all__ = ["Char", "Context", "Event", "Key", "KeyName", "Resize", "screen"]
 
 
 # Colors
@@ -74,8 +77,15 @@ class Key:
     shift: bool = False
 
 
-# Resize joins this union in a later step.
-Event = Char | Key
+@dataclass(frozen=True, slots=True)
+class Resize:
+    """The window changed size; width() and height() already report the new size."""
+
+    width: int
+    height: int
+
+
+Event = Char | Key | Resize
 
 # How long to wait after a trailing ESC or partial sequence before deciding.
 _ESCAPE_TIMEOUT = 0.03
@@ -300,8 +310,17 @@ def _crop_line(text: str, x: int, width: int) -> tuple[int, str]:
 # Terminal
 
 
+# What signal.signal() returns: a handler, SIG_DFL/SIG_IGN, or None.
+_SignalHandler = Callable[[int, FrameType | None], object] | int | None
+
+
 class _Terminal:
-    """Owns fds 0 and 1: raw mode, alternate screen, reading and writing bytes."""
+    """Owns fds 0 and 1: raw mode, alternate screen, reading and writing bytes.
+
+    It also turns SIGWINCH into something select() can wait on: the signal's
+    wakeup fd writes the signal number into a pipe whose read end is selected
+    together with fd 0.
+    """
 
     def __init__(self) -> None:
         if not (os.isatty(0) and os.isatty(1)):
@@ -309,9 +328,19 @@ class _Terminal:
         self._saved = termios.tcgetattr(0)
         self._closed = False
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._signal_r, self._signal_w = os.pipe()
+        os.set_blocking(self._signal_r, False)
+        os.set_blocking(self._signal_w, False)
         self._selector = selectors.DefaultSelector()
         self._selector.register(0, selectors.EVENT_READ)
+        self._selector.register(self._signal_r, selectors.EVENT_READ)
+        self._old_handler: _SignalHandler = None
+        self._old_wakeup_fd = -1
+        self._signals_set = False
         try:
+            self._old_handler = signal.signal(signal.SIGWINCH, _on_sigwinch)
+            self._old_wakeup_fd = signal.set_wakeup_fd(self._signal_w)
+            self._signals_set = True
             self._enter_raw_mode()
             self.write(_ALT_SCREEN_ON + _AUTOWRAP_OFF)
         except BaseException:
@@ -348,10 +377,28 @@ class _Terminal:
             data = data[written:]
 
     def read(self, timeout: float | None) -> str | None:
-        """Read whatever input is available, or return None after timeout seconds."""
-        if not self._selector.select(timeout):
+        """Wait for input or a resize, and read whatever input is available.
+
+        Returns None after timeout seconds with nothing ready, and "" when only
+        the signal pipe is ready (see take_resize()).
+        """
+        ready = self._selector.select(timeout)
+        if not ready:
             return None
+        if not any(key.fd == 0 for key, _ in ready):
+            return ""
         return self._decoder.decode(os.read(0, 4096))
+
+    def take_resize(self) -> bool:
+        """Drain the signal pipe without blocking; True if SIGWINCH arrived."""
+        resized = False
+        while True:
+            try:
+                data = os.read(self._signal_r, 4096)
+            except BlockingIOError:
+                return resized
+            # Other signals with Python handlers write their numbers here too.
+            resized = resized or signal.SIGWINCH in data
 
     def close(self) -> None:
         """Restore the terminal. Safe to call more than once."""
@@ -362,7 +409,21 @@ class _Terminal:
             self.write(_STYLE_RESET + _CURSOR_SHOW + _AUTOWRAP_ON + _ALT_SCREEN_OFF)
         finally:
             termios.tcsetattr(0, termios.TCSAFLUSH, self._saved)
-            self._selector.close()
+            self._restore_signals()
+
+    def _restore_signals(self) -> None:
+        if self._signals_set:
+            signal.set_wakeup_fd(self._old_wakeup_fd)
+            # None means the old handler was not set from Python: use the default.
+            old = signal.SIG_DFL if self._old_handler is None else self._old_handler
+            signal.signal(signal.SIGWINCH, old)
+        self._selector.close()
+        os.close(self._signal_r)
+        os.close(self._signal_w)
+
+
+def _on_sigwinch(signum: int, frame: FrameType | None) -> None:
+    """Do nothing: the wakeup fd already recorded the signal for select()."""
 
 
 # Context and screen()
@@ -453,10 +514,19 @@ class Context:
         """Return the next input event.
 
         timeout=None blocks until one arrives; a number waits at most that many
-        seconds and returns None if nothing arrived.
+        seconds and returns None if nothing arrived. A window resize is checked
+        first on every call: if the size changed, it is stored and a Resize is
+        returned ahead of any queued key events.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
-        while not self._events:
+        while True:
+            # A SIGWINCH can arrive twice for one resize (`uv run` forwards it),
+            # so only a real change of size becomes an event.
+            if self._term().take_resize() and self._term().size() != self.size():
+                self._width, self._height = self._term().size()
+                return Resize(self._width, self._height)
+            if self._events:
+                return self._events.pop(0)
             if self._leftover:
                 # A trailing ESC may be the start of a sequence: give the rest
                 # of it a moment to arrive before deciding.
@@ -474,7 +544,6 @@ class Context:
                     return None
             events, self._leftover = _parse_input(self._leftover + text)
             self._events.extend(events)
-        return self._events.pop(0)
 
 
 def screen() -> Context:

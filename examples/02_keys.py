@@ -1,7 +1,7 @@
-"""Show each key event as it arrives. Quit with Ctrl-C."""
+"""Show each key and resize event as it arrives. Quit with Ctrl-C."""
 
 import mewtui
-from mewtui import Char, Key
+from mewtui import Char, Key, Resize
 
 
 def describe(event: mewtui.Event) -> str:
@@ -10,6 +10,8 @@ def describe(event: mewtui.Event) -> str:
             return modifiers(ctrl, alt, False) + repr(ch)
         case Key(name, ctrl=ctrl, alt=alt, shift=shift):
             return modifiers(ctrl, alt, shift) + name.value
+        case Resize(width, height):
+            return f"Resize to {width}x{height}"
 
 
 def modifiers(ctrl: bool, alt: bool, shift: bool) -> str:
@@ -20,9 +22,8 @@ def modifiers(ctrl: bool, alt: bool, shift: bool) -> str:
 
 
 with mewtui.screen() as ctx:
-    width, height = ctx.size()
     ctx.cursor_move(0, 0)
-    ctx.put("Press keys to see their events. Ctrl-C quits.")
+    ctx.put("Press keys or resize the window to see events. Ctrl-C quits.")
     ctx.flush()
 
     lines: list[str] = []
@@ -31,8 +32,10 @@ with mewtui.screen() as ctx:
         if event == Char("c", ctrl=True):
             break
         # Keep the newest events that fit below the header, newest last.
-        lines = (lines + [f"{describe(event):<20} {event}"])[-(height - 2) :]
+        # The size is read on every event, so a Resize takes effect right away.
+        lines = (lines + [f"{describe(event):<20} {event}"])[-(ctx.height() - 2) :]
+        # Pad each line with spaces so it overwrites what was there before.
         for row, line in enumerate(lines):
             ctx.cursor_move(0, row + 2)
-            ctx.put(line.ljust(width))  # pad with spaces to overwrite the old line
+            ctx.put(line.ljust(ctx.width()))
         ctx.flush()
