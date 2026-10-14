@@ -1,0 +1,26 @@
+[project]
+name = "mewtui"
+version = "0.1.0"
+description = "A small, explicit terminal UI library for Linux."
+readme = "README.md"
+authors = [
+    { name = "Giacomo Agnetti", email = "giacomo.a981@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+extend-exclude = ["CLAUDE.md"]
